@@ -80,8 +80,8 @@ try
     }
 
     // Serve static files from wwwroot
-    app.UseStaticFiles();
     app.UseDefaultFiles();
+    app.UseStaticFiles();
 
     // Health endpoint
     app.MapGet("/health", () =>
