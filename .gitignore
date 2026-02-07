@@ -40,5 +40,6 @@ x86/
 # Application specific
 uploads/
 data/
+logs/
 *.db
 *.sqlite
