@@ -64,14 +64,18 @@ public class EmbeddingService : IEmbeddingService
         response.EnsureSuccessStatusCode();
 
         var responseContent = await response.Content.ReadAsStringAsync(cancellationToken);
-        var embeddingResponse = JsonSerializer.Deserialize<EmbeddingResponse>(responseContent);
+        var embeddingResponse = JsonSerializer.Deserialize<EmbeddingResponse>(responseContent, new JsonSerializerOptions 
+        { 
+            PropertyNameCaseInsensitive = true 
+        });
 
-        if (embeddingResponse?.Embeddings == null || embeddingResponse.Embeddings.Length == 0)
+        if (embeddingResponse?.Embeddings == null || embeddingResponse.Embeddings.Count == 0 || embeddingResponse.Embeddings[0].Length == 0)
         {
             throw new InvalidOperationException("Failed to get embedding from LLM");
         }
 
-        return embeddingResponse.Embeddings;
+        // Ollama returns array of arrays, we need the first one
+        return embeddingResponse.Embeddings[0];
     }
 
     public async Task<List<float[]>> GetEmbeddingsAsync(List<string> texts, CancellationToken cancellationToken = default)
@@ -89,6 +93,6 @@ public class EmbeddingService : IEmbeddingService
 
     private class EmbeddingResponse
     {
-        public float[] Embeddings { get; set; } = Array.Empty<float>();
+        public List<float[]> Embeddings { get; set; } = new();
     }
 }

@@ -55,28 +55,45 @@ public class ChatService : IChatService
     {
         _logger.LogInformation("Processing chat request: {Query}", request.Query);
 
-        // Get query embedding
-        var queryEmbedding = await _embeddingService.GetEmbeddingAsync(request.Query, cancellationToken);
+        List<Citation> citations = new();
+        string context = string.Empty;
+        bool useRag = false;
 
-        // Search for relevant chunks
-        var relevantChunks = await _vectorStoreService.SearchAsync(queryEmbedding, _settings.TopK, cancellationToken);
-
-        // Get document information for citations
-        var documents = await _vectorStoreService.GetAllDocumentsAsync(cancellationToken);
-        var citations = relevantChunks.Select(chunk =>
+        try
         {
-            var doc = documents.FirstOrDefault(d => d.Id == chunk.DocumentId);
-            return new Citation
-            {
-                FileName = doc?.FileName ?? "Unknown",
-                ChunkIndex = chunk.ChunkIndex,
-                Content = chunk.Content
-            };
-        }).ToList();
+            // Try to get query embedding and search documents
+            var queryEmbedding = await _embeddingService.GetEmbeddingAsync(request.Query, cancellationToken);
 
-        // Build context from relevant chunks
-        var context = string.Join("\n\n", relevantChunks.Select((c, i) => 
-            $"[Document: {citations[i].FileName}, Chunk #{c.ChunkIndex}]\n{c.Content}"));
+            // Hybrid search: combine semantic similarity with keyword matching for better accuracy
+            var relevantChunks = await _vectorStoreService.HybridSearchAsync(queryEmbedding, request.Query, _settings.TopK, cancellationToken);
+
+            if (relevantChunks.Any())
+            {
+                useRag = true;
+                
+                // Get document information for citations
+                var documents = await _vectorStoreService.GetAllDocumentsAsync(cancellationToken);
+                citations = relevantChunks.Select(chunk =>
+                {
+                    var doc = documents.FirstOrDefault(d => d.Id == chunk.DocumentId);
+                    return new Citation
+                    {
+                        FileName = doc?.FileName ?? "Unknown",
+                        ChunkIndex = chunk.ChunkIndex,
+                        Content = chunk.Content
+                    };
+                }).ToList();
+
+                // Build context from relevant chunks
+                context = string.Join("\n\n", relevantChunks.Select((c, i) => 
+                    $"[Document: {citations[i].FileName}, Chunk #{c.ChunkIndex}]\n{c.Content}"));
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not retrieve document context. Continuing with normal chat mode.");
+            useRag = false;
+        }
 
         // Get conversation history if conversationId is provided
         var conversationHistory = string.Empty;
@@ -91,10 +108,19 @@ public class ChatService : IChatService
         }
 
         // Build prompt
-        var prompt = BuildPrompt(request.Query, context, conversationHistory);
+        var prompt = BuildPrompt(request.Query, context, conversationHistory, useRag);
 
         // Call LLM
-        var answer = await CallLlmAsync(prompt, cancellationToken);
+        string answer;
+        try
+        {
+            answer = await CallLlmAsync(prompt, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to call LLM");
+            answer = "I'm sorry, but I'm unable to connect to the AI service. Please ensure Ollama is running with the required models (llama3.2 and nomic-embed-text).";
+        }
 
         var conversationId = request.ConversationId ?? Guid.NewGuid().ToString();
         
@@ -110,14 +136,26 @@ public class ChatService : IChatService
         };
     }
 
-    private string BuildPrompt(string query, string context, string conversationHistory)
+    private string BuildPrompt(string query, string context, string conversationHistory, bool useRag)
     {
         var promptBuilder = new StringBuilder();
         
-        promptBuilder.AppendLine("You are a helpful assistant that answers questions based on the provided context.");
-        promptBuilder.AppendLine("Use the context below to answer the question. If you can't answer based on the context, say so.");
-        promptBuilder.AppendLine("When referencing information, mention the document name and chunk number.");
-        promptBuilder.AppendLine();
+        if (useRag && !string.IsNullOrEmpty(context))
+        {
+            promptBuilder.AppendLine("You are a helpful assistant that answers questions based ONLY on the provided context.");
+            promptBuilder.AppendLine("IMPORTANT: Answer the question directly using the information from the context below.");
+            promptBuilder.AppendLine("If the answer is clearly stated in the context, provide it concisely without adding unnecessary commentary.");
+            promptBuilder.AppendLine("When asked about costs, fees, payments, or financial information, carefully search through ALL provided chunks for relevant numbers and amounts.");
+            promptBuilder.AppendLine("Look for terms like: Gebühr, Kosten, Preis, monatlich, jährlich, Pauschale, Tagessatz, Euro, payment, fee, cost.");
+            promptBuilder.AppendLine("Only say you cannot answer if the context truly does not contain relevant information.");
+            promptBuilder.AppendLine("When referencing information, you may mention the document name and chunk number.");
+            promptBuilder.AppendLine();
+        }
+        else
+        {
+            promptBuilder.AppendLine("You are a helpful, friendly AI assistant. Answer questions naturally and conversationally.");
+            promptBuilder.AppendLine();
+        }
 
         if (!string.IsNullOrEmpty(conversationHistory))
         {
@@ -126,9 +164,13 @@ public class ChatService : IChatService
             promptBuilder.AppendLine();
         }
 
-        promptBuilder.AppendLine("Context:");
-        promptBuilder.AppendLine(context);
-        promptBuilder.AppendLine();
+        if (useRag && !string.IsNullOrEmpty(context))
+        {
+            promptBuilder.AppendLine("Context:");
+            promptBuilder.AppendLine(context);
+            promptBuilder.AppendLine();
+        }
+        
         promptBuilder.AppendLine($"Question: {query}");
         promptBuilder.AppendLine();
         promptBuilder.AppendLine("Answer:");
@@ -159,7 +201,10 @@ public class ChatService : IChatService
         response.EnsureSuccessStatusCode();
 
         var responseContent = await response.Content.ReadAsStringAsync(cancellationToken);
-        var chatResponse = JsonSerializer.Deserialize<LlmChatResponse>(responseContent);
+        var chatResponse = JsonSerializer.Deserialize<LlmChatResponse>(responseContent, new JsonSerializerOptions 
+        { 
+            PropertyNameCaseInsensitive = true 
+        });
 
         return chatResponse?.Message?.Content ?? "I couldn't generate a response.";
     }

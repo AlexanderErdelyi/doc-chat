@@ -65,8 +65,8 @@ try
         });
     });
 
-    // Add OpenAPI
-    builder.Services.AddOpenApi();
+    // Add OpenAPI (commented out for .NET 8 compatibility)
+    // builder.Services.AddOpenApi();
 
     var app = builder.Build();
 
@@ -76,7 +76,7 @@ try
 
     if (app.Environment.IsDevelopment())
     {
-        app.MapOpenApi();
+        // app.MapOpenApi(); // Commented out for .NET 8 compatibility
     }
 
     // Serve static files from wwwroot
@@ -150,21 +150,43 @@ try
 
             // Generate embeddings for chunks
             logger.LogInformation("Generating embeddings for {Count} chunks", document.Chunks.Count);
-            foreach (var chunk in document.Chunks)
+            var embeddingsGenerated = true;
+            try
             {
-                chunk.Embedding = await embeddingService.GetEmbeddingAsync(chunk.Content, cancellationToken);
+                foreach (var chunk in document.Chunks)
+                {
+                    chunk.Embedding = await embeddingService.GetEmbeddingAsync(chunk.Content, cancellationToken);
+                }
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to generate embeddings. Document will be stored without embeddings.");
+                embeddingsGenerated = false;
+                
+                // Set empty embeddings so document can still be stored
+                foreach (var chunk in document.Chunks)
+                {
+                    if (chunk.Embedding == null || chunk.Embedding.Length == 0)
+                    {
+                        chunk.Embedding = new float[0];
+                    }
+                }
             }
 
             // Store document and chunks
             await vectorStore.AddDocumentAsync(document, cancellationToken);
             await vectorStore.UpsertChunksAsync(document.Chunks, cancellationToken);
 
+            var message = embeddingsGenerated
+                ? "Document uploaded and processed successfully"
+                : "Document uploaded successfully. Embeddings generation failed - semantic search will not be available for this document. Please ensure Ollama is running.";
+
             return Results.Ok(new UploadResponse
             {
                 DocumentId = document.Id,
                 FileName = document.FileName,
                 ChunksCreated = document.Chunks.Count,
-                Message = "Document uploaded and processed successfully"
+                Message = message
             });
         }
         catch (Exception ex)

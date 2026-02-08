@@ -1,0 +1,10 @@
+This is a test document for the LocalRagAssistant application.
+
+It contains some sample text to test the upload and document processing functionality.
+
+The application should be able to:
+- Upload this document
+- Process it into chunks
+- Handle the case when Ollama is not available for embedding generation
+
+This is just a test file with multiple paragraphs to ensure the chunking works correctly.
